@@ -14,6 +14,9 @@ Output contract (Claude Code hook conventions):
 Configuration (environment variables):
   RBG_TEST_CMD      shell string overriding the auto-detected test command
   RBG_TEST_TIMEOUT  per-run timeout in seconds (default: 120)
+  RBG_SCOPE         "full" (default) runs the whole suite; "related" runs only
+                    the tests connected to the edited file (jest/vitest --related,
+                    go package, pytest counterpart) - for slow or large suites
 """
 
 from __future__ import annotations
@@ -99,7 +102,7 @@ def detect_command(cwd: str) -> tuple[list[str], str] | None:
 
 
 def count_failures(output: str, rc: int, kind: str) -> int:
-    if kind == "go":
+    if kind.startswith("go"):
         n = len(re.findall(r"^\s*--- FAIL:", output, re.MULTILINE))
         if n:
             return n
@@ -128,6 +131,45 @@ def save_state(cwd: str, state: dict) -> None:
             json.dump(state, f)
     except Exception:
         pass  # state is best-effort; never break the hook over it
+
+
+def pytest_related_target(rel_path: str, cwd: str) -> str | None:
+    if is_test_file(rel_path):
+        return rel_path  # the edited test file itself
+    d = os.path.dirname(rel_path)
+    base = os.path.splitext(os.path.basename(rel_path))[0]
+    candidates = [
+        os.path.join(d, f"test_{base}.py"),
+        os.path.join(d, f"{base}_test.py"),
+        os.path.join(d, "tests", f"test_{base}.py"),
+        os.path.join("tests", d, f"test_{base}.py") if d else os.path.join("tests", f"test_{base}.py"),
+        os.path.join("tests", f"test_{base}.py"),
+    ]
+    for c in candidates:
+        if os.path.exists(os.path.join(cwd, c)):
+            return c
+    return None
+
+
+def related_command(kind: str, rel_path: str, cwd: str) -> list[str] | None:
+    """Command running only tests connected to the edited file (RBG_SCOPE=related)."""
+    rel = rel_path.replace(os.sep, "/")
+    if kind == "npm":
+        bin_dir = os.path.join(cwd, "node_modules", ".bin")
+        if os.path.exists(os.path.join(bin_dir, "vitest")):
+            return ["npx", "vitest", "related", rel, "--run", "--silent"]
+        if os.path.exists(os.path.join(bin_dir, "jest")):
+            return ["npx", "jest", "--findRelatedTests", rel, "--silent"]
+        return None
+    if kind == "go":
+        d = os.path.dirname(rel)
+        return ["go", "test", ("./" + d + "/...") if d else "./..."]
+    if kind == "pytest":
+        target = pytest_related_target(rel_path, cwd)
+        if target:
+            return [sys.executable, "-m", "pytest", "-x", "-q", target]
+        return None
+    return None  # cargo / dotnet / make: no cheap related scope, fall back to full suite
 
 
 def run_tests(cmd: list[str], cwd: str) -> tuple[str, int, float, bool]:
@@ -172,6 +214,11 @@ def main() -> None:
     if not detected:
         return  # no test suite detected: hook is a no-op
     cmd, kind = detected
+    if os.environ.get("RBG_SCOPE", "full").strip().lower() == "related":
+        scoped = related_command(kind, os.path.relpath(abs_path, cwd), cwd)
+        if scoped:
+            cmd = scoped
+            kind = kind + ":related"
 
     out, rc, elapsed, timed_out = run_tests(cmd, cwd)
 

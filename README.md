@@ -64,8 +64,21 @@ This copies the skill to `~/.claude/skills/`, the hook to `~/.claude/hooks/`, an
 |---|---|---|
 | `RBG_TEST_CMD` | auto-detect | Shell string for the test command, e.g. `RBG_TEST_CMD="npm run test:unit"` |
 | `RBG_TEST_TIMEOUT` | `120` | Seconds before the run is killed |
+| `RBG_SCOPE` | `full` | `full` runs the whole suite after every edit; `related` runs only the tests connected to the edited file |
 
 Set them in `~/.claude/settings.json` (`env` block) or export them in your shell.
+
+## Slow suites? Use `RBG_SCOPE=related`
+
+Running the full suite after every edit is the strongest gate, but on a large or slow codebase it turns every edit into a full CI run. Set `RBG_SCOPE=related` and the gate runs only what the edited file can affect:
+
+| Runner | Related scope runs |
+|---|---|
+| jest / vitest | `--findRelatedTests <file>` / `vitest related <file>` |
+| Go | `go test ./<package-dir>/...` |
+| pytest | the counterpart test file (`test_<module>.py`, `<module>_test.py`) |
+
+Runners without a cheap related scope (Cargo, dotnet, make) fall back to the full suite. The tradeoff: related scope is much faster but can miss failures in distant consumers — for big repos, related scope during iteration plus one full run before commit is a solid compromise.
 
 ## Does the model matter?
 
